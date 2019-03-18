@@ -4,29 +4,42 @@ const fs = require('fs'); // FileStream
 const moment = require('moment'); // Date Message
 
 const CLIENT_ID = require('./json/Config.json')['client_id']; // application register code
-const CHANNEL = 'lirik';
+const CHANNEL_LIST = ['lirik'];
+const VIDEO_ID = '389178879'
 const RECORD_START_AT = moment('2019-03-04T02:08:11Z');
 
 const writingPromise = [];
+let afterWriting = {};
 
 function log(code, message, show=true){
 	/* 
-		00: 
+		00: In checkVideoInfo(), the video status is not a known value
 	*/
 	if (show){
 		fs.appendFileSync('./event_log.txt', moment().format("YYYY/MM/DD kk:mm:ss A") + " | Error " + code.toString().padStart(2, "0") + ": " + message + "\n", "UTF-8");
 	}
 }
 
-async function checkVideoInfo(channel, id){
-	let filePath = './vod/' + channel + '/' + id + '/info.json'; // the path of video info
+function syncWriteData(path, data){
+	writingPromise.push(
+		new Promise( (resolve, reject) => {
+			fs.writeFile(path, data, (err) => {
+				if (err) throw err;
+				resolve();
+			});
+		})
+	);
+}
+
+async function checkVideoInfo(channel, id){ // check specified video chat room message is crawled
+	let infoPath = './vod/' + channel + '/' + id + '/info.json'; // the path of video info
 	let data;
 	/* Check video info file */
-	if ( ! fs.existsSync(filePath) ){ // if video info still not be created
+	if ( ! fs.existsSync(infoPath) ){ // if video info still not be created
 		data = await getSpecifiedVideoInfo(id);
 	}
 	else {
-		data = JSON.parse( fs.readFileSync(filePath) );
+		data = JSON.parse( fs.readFileSync(infoPath) );
 	}
 	
 	if (data['ntust_flag']){ // already been crawled
@@ -34,45 +47,31 @@ async function checkVideoInfo(channel, id){
 	}
 	else {
 		if (data['status'] == 'recorded'){ // broadcast is end, it can be crawled
+			await crawlChatMessage(channel, id); // crawl chat room message
+			
 			data['ntust_flag'] = true;
-			
-			
+			syncWriteData(infoPath, data);
+			return;
 		}
 		else if (data['status'] != 'recording'){ // not sure for broadcast status
+			log(0, checkVideoInfo.name + ' - Not known video status (' + id + ' - ' + data['status']);
+		
 			if ( moment().diff( moment(data['created_at']), 'days' ) < 3 ){ // if the broadcast start within last 3 day, we don't crawl
 				data['ntust_flag'] = false; // mark as not crawling
-				writingPromise.push(
-					new Promise( (resolve, reject) => {
-						fs.writeFile(filePath, data, (err) => {
-							if (err) throw err;
-							resolve();
-						});
-					})
-				);
+				syncWriteData(infoPath, data);
 				return;
 			}
 			else { // the video is 3 days ago
-				if (){
-					
-				}
-				else {
-					
-				}
+				await crawlChatMessage(channel, id); // crawl chat room message
+			
 				data['ntust_flag'] = true;
-				
-				writingPromise.push(xxxxxxxxxxxxxxxxxxxxxx);
+				syncWriteData(infoPath, data);
+				return;
 			}
 		}
 		else { // the broadcast is still streaming
 			data['ntust_flag'] = false; // mark as not crawling
-			writingPromise.push(
-				new Promise( (resolve, reject) => {
-					fs.writeFile(filePath, data, (err) => {
-						if (err) throw err;
-						resolve();
-					});
-				})
-			);
+			syncWriteData(infoPath, data);
 			return;
 		}
 	}
@@ -89,7 +88,7 @@ function getSpecifiedVideoInfo(id){
 		method: "GET"
 		}, function(error, res, body){
 			let data = JSON.parse(body);
-			console.log(data);
+			//console.log(data);
 			resolve(data);
 		});
 	});
@@ -107,8 +106,8 @@ function getSpecifiedClipInfo(slug){
 		}, function(error, res, body){
 			let a = JSON.parse(body);
 			console.log(a);
-			console.log(a['clips'].length);
-			console.log(a['_cursor']);
+			/*console.log(a['clips'].length);
+			console.log(a['_cursor']);*/
 			
 			resolve();
 		});
@@ -170,6 +169,35 @@ function crawlClipInfo(channel, cursor){
 	});
 }
 
+async function crawlChatMessage(channel, id){ // get and store message data
+	const crawlChatPromise = [];
+
+	let cursor;
+	let message_id = 1;
+	do {
+		let rawData = await getChatMessage(id, cursor);
+		let data = JSON.parse(rawData);
+		
+		cursor = data['_next'];
+		
+		crawlChatPromise.push(
+			new Promise( (resolve, reject) => {
+				fs.writeFile('./vod/' + channel + '/' + id + '/Message-' + message_id + '.json', rawData, (err) => {
+					if (err) throw err;
+					resolve();
+				});
+			})
+		);
+		
+		message_id ++;
+	} while (cursor);
+	
+	return new Promise( async (resolve,reject) => {
+		await Promise.all(crawlChatPromise);
+		resolve();
+	});
+}
+
 function getChatMessage(id, cursor){
 	return new Promise(function (resolve, reject){
 		request({
@@ -182,42 +210,189 @@ function getChatMessage(id, cursor){
 }
 
 async function main(){
-	//await getSpecifiedClipInfo();
 	let cursor;
-	/*do {
-		cursor = await crawlClipInfo(CHANNEL, cursor);
-	} while (cursor);*/
 	
-	/*let folderList = fs.readdirSync('./vod/' + CHANNEL); // video id list
-	if (await checkVideoInfo())
+	/*for (const channel of CHANNEL_LIST){
+		do {
+			cursor = await crawlClipInfo(channel, cursor);
+		} while (cursor);
+	}
 	
-	*/
+	for (const channel of CHANNEL_LIST){
+		let folderList = fs.readdirSync('./vod/' + channel); // video id list
+		for (const videoID of folderList){
+			checkVideoInfo(channel, videoID);
+		}
+	}*/
 	
-	//await getSpecifiedVideoInfo('390174753');
+	let videoLength = 28662;
+	/*let commentFQ = new Array(videoLength).fill(0);
+	let data;
+	for (let i=1; i<=1276; i++){
+		data = JSON.parse( fs.readFileSync('./vod/' + CHANNEL + '/' + VIDEO_ID + '/Message-' + i + '.json') );
+		for ( const comment of data['comments'] ){
+			let offset = Math.floor( comment['content_offset_seconds'] );
+			commentFQ[offset] ++;
+		}
+	}
 	
-	let l = 0;
+	commentFQ = commentFQ.slice(0, videoLength);
+	console.log(commentFQ.length)
 	
-	cursor = undefined; // clear
-	let message_id = 1;
-	do {
-		let rawData = await getChatMessage(389178879, cursor);
-		let data = JSON.parse(rawData);
-		l += data['comments'].length
-		cursor = data['_next'];
-		/*writingPromise.push(
-			new Promise( (resolve, reject) => {
-				fs.writeFile('./Message-' + message_id + '.json', rawData, (err) => {
-					if (err) throw err;
-					resolve();
-				});
-			})
-		);*/
+	writingPromise.push(
+		new Promise( (resolve, reject) => {
+			fs.writeFile('./comments.json', JSON.stringify(commentFQ), (err) => {
+				if (err) throw err;
+				resolve();
+			});
+		})
+	);*/
+	
+	let commentFQ = require('./comments.json');
+	let predictedVOD = new Array(videoLength).fill(0);
+	let predictedCount = 0; // for precision computing
+	
+	let sum = 72423;
+	/*for (let i=0; i<videoLength; i++){
+		sum += commentFQ[i];
+	}
+	console.log(sum);
+	console.log(sum/3600);*/
+	
+	/**/let avgComentFrequency = sum / videoLength;
+	let strike = 0;
+	for (let i=0; i<videoLength; i++){
+		if (commentFQ[i] > avgComentFrequency){
+			strike ++
+		}
+		else {
+			if (strike >= 5){
+				let index = i - strike;
+				predictedVOD[index] = {};
+				predictedVOD[index]['duration'] = strike;
+				predictedVOD[index]['precision'] = [];
+				//console.log(i-strike + ' ' + strike)
+				
+				predictedCount ++;
+			}
+			
+			strike = 0;
+		}
+	}
+	
+	/*let testi = 12990
+	predictedVOD[testi] = {};
+	predictedVOD[testi]['duration'] = 13;
+	predictedVOD[testi]['precision'] = [];*/
+	
+	let precision = 0,
+		recall = 0;
+	
+	const MAX_CLIP_LENGTH = 60,
+		MIN_CLIP_LENGTH = 5;
+	let clipList = fs.readdirSync('./vod/' + CHANNEL_LIST[0] + '/' + VIDEO_ID + '/clip')
+	for (const clip of clipList){
+		let data = JSON.parse( fs.readFileSync('./vod/' + CHANNEL_LIST[0] + '/' + VIDEO_ID + '/clip/' + clip) );
 		
-		message_id ++;
-		console.log(l);
-	} while (cursor);
-	console.log(l);
-	console.log(message_id);
+		let localRecall = 0,
+			overlapTime = 0; // for local recall computing
+		
+		let duration = Math.ceil( data['duration'] ), // length of ground true clip
+			endOfClip = data['vod']['offset'] + duration;
+		for (let i = data['vod']['offset'] - (MAX_CLIP_LENGTH-1); i <= data['vod']['offset'] - MIN_CLIP_LENGTH; i++){ // (offset - 59) <= prediction <= (offset - 5)	// eg. offset = 85, duration = 10, 26~80
+			if (predictedVOD[i] && (i + predictedVOD[i]['duration']) > data['vod']['offset']){ /* Simplify from (i + (predictedVOD[i]['duration']-1)) >= data['vod']['offset'] */
+				let overlap;
+				
+				/* Simplify from the following comment part. This doesn't compute real video timeline, it only compute overlap  */
+				let endOfPrediction = i + predictedVOD[i]['duration'];
+					
+				overlap = endOfPrediction - data['vod']['offset']; // compute overlap seconds
+				
+				if (endOfPrediction > endOfClip){
+					overlap -= (endOfPrediction - endOfClip); // remove the part over than the end of ground true
+				}
+				/*
+				let endOfPrediction = i + (predictedVOD[i]['duration']-1),
+					endOfClip = data['vod']['offset'] + (duration-1);
+					
+				overlap = endOfPrediction - data['vod']['offset']; // compute overlap seconds
+				
+				if (endOfPrediction > endOfClip){
+					overlap -= (endOfPrediction - endOfClip); // remove the part over than the end of ground true
+				}
+				
+				overlap += 1; // include head and tail seconds
+				*/
+				//console.log(1+' ' + overlap);console.log(data['slug'])
+				predictedVOD[i]['precision'].push( overlap/predictedVOD[i]['duration'] );
+				localRecall += overlap/duration;
+				overlapTime ++;
+			}
+		}
+		
+		for (let i = data['vod']['offset'] - MIN_CLIP_LENGTH + 1; i < data['vod']['offset']; i++){ // (offset - 4(less than MIN_CLIP_LENGTH)) <= prediction < offset	// 81~84
+			if (predictedVOD[i]){ // no need to check if it overlap the ground truth period, it must be in the period
+				let overlap;
+				
+				/* Same as above */
+				let endOfPrediction = i + predictedVOD[i]['duration'];
+					
+				overlap = endOfPrediction - data['vod']['offset']; // compute overlap seconds
+				
+				if (endOfPrediction > endOfClip){
+					overlap -= (endOfPrediction - endOfClip); // remove the part over than the end of ground true
+				}
+				//console.log(2+' ' + overlap);
+				predictedVOD[i]['precision'].push( overlap/predictedVOD[i]['duration'] );
+				localRecall += overlap/duration;
+				overlapTime ++;
+			}
+		}
+		
+		for (let i = data['vod']['offset']; i < data['vod']['offset'] + duration; i++){ // offset <= prediction < (offset + duration) 	// 85~94
+			if (predictedVOD[i]){ // no need to check if it overlap the ground truth period, it must be in the period
+				let overlap;
+				
+				/* Same as above */
+				let endOfPrediction = i + predictedVOD[i]['duration'];
+					
+				overlap = endOfClip - i; // compute overlap seconds
+				
+				if (endOfPrediction < endOfClip){
+					overlap -= endOfClip - endOfPrediction;
+				}
+				//console.log(3+' ' + overlap);
+				predictedVOD[i]['precision'].push( overlap/predictedVOD[i]['duration'] );
+				localRecall += overlap/duration;
+				overlapTime ++;
+			}
+		}
+		
+		if (overlapTime){
+			localRecall /= overlapTime;
+		
+			recall += localRecall;
+		}
+	}
+	
+	for (let i=0; i<predictedVOD.length; i++){
+		if (predictedVOD[i] && predictedVOD[i]['precision'].length){
+			let localPrecision = 0;
+			for (const singlePrecisionValue of predictedVOD[i]['precision']){
+				localPrecision += singlePrecisionValue;
+			} 
+			localPrecision /= predictedVOD[i]['precision'].length;
+			
+			precision += localPrecision;
+		}
+	}
+	
+	precision /= predictedCount;
+	recall /= clipList.length;
+	
+	console.log(precision + ' ' + recall)
+	
+	//console.log(predictedVOD[testi]);
 	//await Promise.all(writingPromise);
 }
 
