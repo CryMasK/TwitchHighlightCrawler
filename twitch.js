@@ -209,6 +209,19 @@ function getChatMessage(id, cursor){
 	});
 }
 
+function getBaseline(channel, video_id){
+	let dir = './vod/' + channel + '/' + video_id + '/'
+	
+	let messageList = fs.readdirSync(dir); // video message list
+	messageList = messageList.filter(filename => /Message-\d+\.json/.test(filename));
+}
+
+function evaluateLocalPrecisionAndRecall(channel, video_id){
+	
+	
+	
+}
+
 async function main(){
 	let cursor;
 	
@@ -249,8 +262,13 @@ async function main(){
 	);*/
 	
 	let commentFQ = require('./comments.json');
-	let predictedVOD = new Array(videoLength).fill(0);
-	let predictedCount = 0; // for precision computing
+	let predictedFragment = new Array(videoLength).fill(0);
+	let globalPredictedFragment = new Array(videoLength).fill(0),
+		globalClip =  new Array(videoLength).fill(0);
+		
+	let	globalPredictedFragmentLength = 0,
+		globalClipLenght = 0; // for global precision & recall computing
+	let predictedFragmentCount = 0; // for precision computing
 	
 	let sum = 72423;
 	/*for (let i=0; i<videoLength; i++){
@@ -268,12 +286,17 @@ async function main(){
 		else {
 			if (strike >= 5){
 				let index = i - strike;
-				predictedVOD[index] = {};
-				predictedVOD[index]['duration'] = strike;
-				predictedVOD[index]['precision'] = [];
+				predictedFragment[index] = {};
+				predictedFragment[index]['duration'] = strike;
+				predictedFragment[index]['precision'] = [];
 				//console.log(i-strike + ' ' + strike)
 				
-				predictedCount ++;
+				predictedFragmentCount ++;
+				
+				for (let j=index; j<i; j++){
+					globalPredictedFragment[j] = 1;
+				}
+				globalPredictedFragmentLength += strike;
 			}
 			
 			strike = 0;
@@ -281,12 +304,19 @@ async function main(){
 	}
 	
 	/*let testi = 12990
-	predictedVOD[testi] = {};
-	predictedVOD[testi]['duration'] = 13;
-	predictedVOD[testi]['precision'] = [];*/
+	predictedFragment[testi] = {};
+	predictedFragment[testi]['duration'] = 13;
+	predictedFragment[testi]['precision'] = [];*/
 	
-	let precision = 0,
-		recall = 0;
+	let localPrecision = 0,
+		localRecall = 0;
+	let localBestPrecision = 0,
+		localBestRecall = 0;
+	
+	let clipMiss = 0;
+	let offsetToLeft = 0,
+		offsetToRight = 0,
+		noOffset = 0;
 	
 	const MAX_CLIP_LENGTH = 60,
 		MIN_CLIP_LENGTH = 5;
@@ -294,25 +324,40 @@ async function main(){
 	for (const clip of clipList){
 		let data = JSON.parse( fs.readFileSync('./vod/' + CHANNEL_LIST[0] + '/' + VIDEO_ID + '/clip/' + clip) );
 		
-		let localRecall = 0,
+		let recall = 0,
 			overlapTime = 0; // for local recall computing
+		let bestRecall = 0; // for local best recall computing
 		
 		let duration = Math.ceil( data['duration'] ), // length of ground true clip
-			endOfClip = data['vod']['offset'] + duration;
+			endOfClip = data['vod']['offset'] + duration; // not real video end timeline point
 		for (let i = data['vod']['offset'] - (MAX_CLIP_LENGTH-1); i <= data['vod']['offset'] - MIN_CLIP_LENGTH; i++){ // (offset - 59) <= prediction <= (offset - 5)	// eg. offset = 85, duration = 10, 26~80
-			if (predictedVOD[i] && (i + predictedVOD[i]['duration']) > data['vod']['offset']){ /* Simplify from (i + (predictedVOD[i]['duration']-1)) >= data['vod']['offset'] */
+			if (predictedFragment[i] && (i + predictedFragment[i]['duration']) > data['vod']['offset']){ /* Simplify from (i + (predictedFragment[i]['duration']-1)) >= data['vod']['offset'] */
 				let overlap;
 				
 				/* Simplify from the following comment part. This doesn't compute real video timeline, it only compute overlap  */
-				let endOfPrediction = i + predictedVOD[i]['duration'];
+				let endOfPrediction = i + predictedFragment[i]['duration'];
 					
 				overlap = endOfPrediction - data['vod']['offset']; // compute overlap seconds
 				
-				if (endOfPrediction > endOfClip){
+				if (endOfPrediction > endOfClip){ // predicted fragment is larger than clip
 					overlap -= (endOfPrediction - endOfClip); // remove the part over than the end of ground true
+					
+					if ((data['vod']['offset'] - i) > (endOfPrediction - endOfClip)){
+						offsetToLeft ++;
+					}
+					else if ((data['vod']['offset'] - i) < (endOfPrediction - endOfClip)){
+						offsetToRight ++
+					}
+					else {
+						noOffset ++;
+						console.log(18);
+					}
+				}
+				else {
+					offsetToLeft ++;
 				}
 				/*
-				let endOfPrediction = i + (predictedVOD[i]['duration']-1),
+				let endOfPrediction = i + (predictedFragment[i]['duration']-1),
 					endOfClip = data['vod']['offset'] + (duration-1);
 					
 				overlap = endOfPrediction - data['vod']['offset']; // compute overlap seconds
@@ -323,76 +368,166 @@ async function main(){
 				
 				overlap += 1; // include head and tail seconds
 				*/
+				
 				//console.log(1+' ' + overlap);console.log(data['slug'])
-				predictedVOD[i]['precision'].push( overlap/predictedVOD[i]['duration'] );
-				localRecall += overlap/duration;
+				
+				// precision
+				predictedFragment[i]['precision'].push( overlap/predictedFragment[i]['duration'] );
+				// local recall
+				let singleRecallValue = overlap / duration;
+				recall += singleRecallValue;
 				overlapTime ++;
+				// local best recall
+				if (singleRecallValue > bestRecall){ // find max
+					bestRecall = singleRecallValue;
+				}
 			}
 		}
 		
 		for (let i = data['vod']['offset'] - MIN_CLIP_LENGTH + 1; i < data['vod']['offset']; i++){ // (offset - 4(less than MIN_CLIP_LENGTH)) <= prediction < offset	// 81~84
-			if (predictedVOD[i]){ // no need to check if it overlap the ground truth period, it must be in the period
+			if (predictedFragment[i]){ // no need to check if it overlap the ground truth period, it must be in the period
 				let overlap;
 				
 				/* Same as above */
-				let endOfPrediction = i + predictedVOD[i]['duration'];
+				let endOfPrediction = i + predictedFragment[i]['duration'];
 					
 				overlap = endOfPrediction - data['vod']['offset']; // compute overlap seconds
 				
-				if (endOfPrediction > endOfClip){
+				if (endOfPrediction > endOfClip){ // predicted fragment is larger than clip
 					overlap -= (endOfPrediction - endOfClip); // remove the part over than the end of ground true
+					
+					if ((data['vod']['offset'] - i) > (endOfPrediction - endOfClip)){
+						offsetToLeft ++;
+					}
+					else if ((data['vod']['offset'] - i) < (endOfPrediction - endOfClip)){
+						offsetToRight ++
+					}
+					else {
+						noOffset ++;
+						console.log(28);
+					}
 				}
+				else {
+					offsetToLeft ++;
+				}
+				
 				//console.log(2+' ' + overlap);
-				predictedVOD[i]['precision'].push( overlap/predictedVOD[i]['duration'] );
-				localRecall += overlap/duration;
+				
+				// precision
+				predictedFragment[i]['precision'].push( overlap/predictedFragment[i]['duration'] );
+				// local recall
+				let singleRecallValue = overlap / duration;
+				recall += singleRecallValue;
 				overlapTime ++;
+				// local best recall
+				if (singleRecallValue > bestRecall){ // find max
+					bestRecall = singleRecallValue;
+				}
 			}
 		}
 		
-		for (let i = data['vod']['offset']; i < data['vod']['offset'] + duration; i++){ // offset <= prediction < (offset + duration) 	// 85~94
-			if (predictedVOD[i]){ // no need to check if it overlap the ground truth period, it must be in the period
+		for (let i = data['vod']['offset']; i < endOfClip; i++){ // offset <= prediction < (offset + duration) 	// 85~94
+			if (predictedFragment[i]){ // no need to check if it overlap the ground truth period, it must be in the period
 				let overlap;
 				
 				/* Same as above */
-				let endOfPrediction = i + predictedVOD[i]['duration'];
+				let endOfPrediction = i + predictedFragment[i]['duration'];
 					
 				overlap = endOfClip - i; // compute overlap seconds
 				
-				if (endOfPrediction < endOfClip){
+				if (endOfPrediction < endOfClip){ // predicted fragment is smaller than clip
 					overlap -= endOfClip - endOfPrediction;
 				}
+				else {
+					if (endOfPrediction == endOfClip){
+						if (i == data['vod']['offset']){
+							noOffset ++;
+							console.log(777);
+						}
+					}
+					else {
+						offsetToRight ++;
+					}
+				}
+				
 				//console.log(3+' ' + overlap);
-				predictedVOD[i]['precision'].push( overlap/predictedVOD[i]['duration'] );
-				localRecall += overlap/duration;
+				
+				// precision
+				predictedFragment[i]['precision'].push( overlap/predictedFragment[i]['duration'] );
+				// local recall
+				let singleRecallValue = overlap / duration;
+				recall += singleRecallValue;
 				overlapTime ++;
+				// local best recall
+				if (singleRecallValue > bestRecall){ // find max
+					bestRecall = singleRecallValue;
+				}
+			}
+			
+			if ( ! globalClip[i] ){ // globalClip[i] == 0;
+				globalClip[i] = 1;
+				globalClipLenght ++;
 			}
 		}
 		
+		// recall
 		if (overlapTime){
-			localRecall /= overlapTime;
+			recall /= overlapTime;
 		
-			recall += localRecall;
+			localRecall += recall;
+			localBestRecall += bestRecall;
+		}
+		else {
+			clipMiss ++;
 		}
 	}
 	
-	for (let i=0; i<predictedVOD.length; i++){
-		if (predictedVOD[i] && predictedVOD[i]['precision'].length){
-			let localPrecision = 0;
-			for (const singlePrecisionValue of predictedVOD[i]['precision']){
-				localPrecision += singlePrecisionValue;
-			} 
-			localPrecision /= predictedVOD[i]['precision'].length;
-			
-			precision += localPrecision;
+	let globalOverlap = 0;
+	let predictionMiss = 0; // for statistical analysis
+	for (let i=0; i<videoLength; i++){ // loop whole timeline
+		if (predictedFragment[i]){ // check have predicted fragment
+			if (predictedFragment[i]['precision'].length){ // the fragment has overlap
+				let precision = 0; // for local precision computing
+				let bestPrecision = 0; // for local best precision computing
+				
+				for (const singlePrecisionValue of predictedFragment[i]['precision']){
+					// local precision
+					precision += singlePrecisionValue;
+					// local best precision
+					if (singlePrecisionValue > bestPrecision){ // find max
+						bestPrecision = singlePrecisionValue;
+					}
+				} 
+				precision /= predictedFragment[i]['precision'].length;
+				
+				localPrecision += precision;
+				localBestPrecision += bestPrecision;
+			}
+			else { // predictionMiss
+				predictionMiss ++;
+			}
+		}
+		
+		// global
+		if (globalPredictedFragment[i] == 1 && globalClip[i] == 1){
+			globalOverlap ++;
 		}
 	}
+	console.log(localPrecision/(predictedFragmentCount - predictionMiss));
+	console.log(localRecall/(clipList.length - clipMiss));
+	localPrecision /= predictedFragmentCount;
+	localRecall /= clipList.length;
 	
-	precision /= predictedCount;
-	recall /= clipList.length;
+	localBestPrecision /= predictedFragmentCount;
+	localBestRecall /= clipList.length;
 	
-	console.log(precision + ' ' + recall)
+	console.log(localPrecision + ' ' + localRecall);
+	console.log(localBestPrecision + ' ' + localBestRecall);
+	console.log(globalOverlap/globalPredictedFragmentLength + ' ' + globalOverlap/globalClipLenght);
+	console.log(predictionMiss + ' ' + clipMiss);
+	console.log(offsetToLeft + ' ' + noOffset + ' ' + offsetToRight)
 	
-	//console.log(predictedVOD[testi]);
+	//console.log(predictedFragment[testi]);
 	//await Promise.all(writingPromise);
 }
 
