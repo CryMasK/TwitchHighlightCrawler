@@ -151,7 +151,7 @@ function crawlClipInfo(channel, cursor){
 				
 					writingPromise.push( 
 						new Promise( (resolve, reject) => {
-							if ( ! fs.existsSync(dir) ){
+							if ( ! fs.existsSync(dir) ){ // check directory is exist
 								fs.mkdirSync( dir, {recursive: true} );
 							}
 							
@@ -209,16 +209,78 @@ function getChatMessage(id, cursor){
 	});
 }
 
-function getBaseline(channel, video_id){
+async function getBaseline(channel, video_id){
 	let dir = './vod/' + channel + '/' + video_id + '/'
 	
-	let messageList = fs.readdirSync(dir); // video message list
-	messageList = messageList.filter(filename => /Message-\d+\.json/.test(filename));
+	/* Parse the data */
+	let videoLength = JSON.parse( fs.readFileSync(dir + 'info.json') )['length']; // get video length
+	let messageFrequency = new Array(videoLength).fill(0); // store message frequency per second
+	let totalMessage = 0; // sum of the number of messages
+	
+	const readMessagePromise = [];
+	let videoInfoList = fs.readdirSync(dir); // video message list
+	for (const filename of videoInfoList){
+		if ( /Message-\d+\.json/.test(filename) ){
+			readMessagePromise.push(
+				new Promise( (resolve, reject) => {
+					fs.readFile(dir + filename, (err, data) => {
+						if (err) throw err;
+						
+						data = JSON.parse(data);
+						for ( const comment of data['comments'] ){ // read each message offset
+							let offset = Math.floor( comment['content_offset_seconds'] );
+							if (offset < videoLength){ /* Twitch still record messages when a streaming is end */
+								messageFrequency[offset] ++;
+								totalMessage ++;
+							}
+						}
+						
+						resolve();
+					});
+				})
+			);
+		}
+	}
+	
+	await Promise.all(readMessagePromise);
+	
+	/* Predict local & global highlight fragment */
+	let localFragment = new Array(videoLength).fill(0),
+		globalFragment = new Array(videoLength).fill(0);
+		
+	let avgMessageFrequency = totalMessage / videoLength;
+	let strike = 0;
+	for (let i=0; i<videoLength; i++){
+		if (messageFrequency[i] > avgMessageFrequency){
+			strike ++
+		}
+		else {
+			if (strike >= 5){
+				let index = i - strike;
+				localFragment[index] = {};
+				localFragment[index]['duration'] = strike;
+				localFragment[index]['precision'] = [];
+				
+				for (let j=index; j<i; j++){
+					globalFragment[j] = 1; // mark as highlight second
+				}
+			}
+			
+			strike = 0; // reset strike
+		}
+	}
+	
+	let obj = {
+		local: localFragment,
+		globaL: globalFragment
+	}
+	return obj;
+	/*return new Promise( (resolve, reject) => {
+		resolve(obj);
+	});*/
 }
 
 function evaluateLocalPrecisionAndRecall(channel, video_id){
-	
-	
 	
 }
 
@@ -277,11 +339,20 @@ async function main(){
 	console.log(sum);
 	console.log(sum/3600);*/
 	
-	/**/let avgComentFrequency = sum / videoLength;
+	let eachPredictionLengthCounter = new Array(61).fill(0),
+		eachClipLengthCounter = new Array(61).fill(0); // for predicted and ground true fragment length & comment frequency analysis
+		
+	let avgCommentFrequencyForEachPredictionLength = new Array(61).fill(0),
+		avgCommentFrequencyForEachClipLength = new Array(61).fill(0); // for predicted and ground true fragment length & comment frequency analysis
+	
+	let avgComentFrequency = sum / videoLength;
+	/*let avgComentFrequency = 3.333990425232329; // average comment frequency in highlight fragment*/
+	let localCommentFrequency = 0; // for predicted and ground true fragment length & comment frequency analysis
 	let strike = 0;
 	for (let i=0; i<videoLength; i++){
 		if (commentFQ[i] > avgComentFrequency){
 			strike ++
+			localCommentFrequency += commentFQ[i];
 		}
 		else {
 			if (strike >= 5){
@@ -297,9 +368,33 @@ async function main(){
 					globalPredictedFragment[j] = 1;
 				}
 				globalPredictedFragmentLength += strike;
+				
+				/* predicted fragment length & comment frequency analysis */
+				eachPredictionLengthCounter[strike] ++;
+				avgCommentFrequencyForEachPredictionLength[strike] += localCommentFrequency / strike;
 			}
 			
-			strike = 0;
+			strike = 0; // reset
+			localCommentFrequency = 0; // reset
+		}
+		
+		if (i == videoLength - 1 && strike >= 5){ // check for the last second
+			let index = i - strike;
+			predictedFragment[index] = {};
+			predictedFragment[index]['duration'] = strike;
+			predictedFragment[index]['precision'] = [];
+			//console.log(i-strike + ' ' + strike)
+			
+			predictedFragmentCount ++;
+			
+			for (let j=index; j<i; j++){
+				globalPredictedFragment[j] = 1;
+			}
+			globalPredictedFragmentLength += strike;
+			
+			/* predicted fragment length & comment frequency analysis */
+			eachPredictionLengthCounter[strike] ++;
+			avgCommentFrequencyForEachPredictionLength[strike] += localCommentFrequency / strike;
 		}
 	}
 	
@@ -320,9 +415,14 @@ async function main(){
 	
 	const MAX_CLIP_LENGTH = 60,
 		MIN_CLIP_LENGTH = 5;
-	let clipList = fs.readdirSync('./vod/' + CHANNEL_LIST[0] + '/' + VIDEO_ID + '/clip')
+	let clipList = fs.readdirSync('./vod/' + CHANNEL_LIST[0] + '/' + VIDEO_ID + '/clip');
+	//let clipLength = clipList.length;
 	for (const clip of clipList){
 		let data = JSON.parse( fs.readFileSync('./vod/' + CHANNEL_LIST[0] + '/' + VIDEO_ID + '/clip/' + clip) );
+		/*if (data['title'] == '4 WINS OR DELETING CHANNEL'){ // skip clip with default title
+			clipLength --;
+			continue;
+		}*/
 		
 		let recall = 0,
 			overlapTime = 0; // for local recall computing
@@ -330,6 +430,10 @@ async function main(){
 		
 		let duration = Math.ceil( data['duration'] ), // length of ground true clip
 			endOfClip = data['vod']['offset'] + duration; // not real video end timeline point
+		
+		/* for true clip length & comment frequency analysis */
+		eachClipLengthCounter[duration] ++;
+		
 		for (let i = data['vod']['offset'] - (MAX_CLIP_LENGTH-1); i <= data['vod']['offset'] - MIN_CLIP_LENGTH; i++){ // (offset - 59) <= prediction <= (offset - 5)	// eg. offset = 85, duration = 10, 26~80
 			if (predictedFragment[i] && (i + predictedFragment[i]['duration']) > data['vod']['offset']){ /* Simplify from (i + (predictedFragment[i]['duration']-1)) >= data['vod']['offset'] */
 				let overlap;
@@ -356,7 +460,7 @@ async function main(){
 				else {
 					offsetToLeft ++;
 				}
-				/*
+				/**
 				let endOfPrediction = i + (predictedFragment[i]['duration']-1),
 					endOfClip = data['vod']['offset'] + (duration-1);
 					
@@ -367,7 +471,7 @@ async function main(){
 				}
 				
 				overlap += 1; // include head and tail seconds
-				*/
+				**/
 				
 				//console.log(1+' ' + overlap);console.log(data['slug'])
 				
@@ -404,7 +508,7 @@ async function main(){
 					}
 					else {
 						noOffset ++;
-						console.log(28);
+						//console.log(28);
 					}
 				}
 				else {
@@ -426,6 +530,7 @@ async function main(){
 			}
 		}
 		
+		localCommentFrequency = 0;
 		for (let i = data['vod']['offset']; i < endOfClip; i++){ // offset <= prediction < (offset + duration) 	// 85~94
 			if (predictedFragment[i]){ // no need to check if it overlap the ground truth period, it must be in the period
 				let overlap;
@@ -465,9 +570,11 @@ async function main(){
 			}
 			
 			if ( ! globalClip[i] ){ // globalClip[i] == 0;
-				globalClip[i] = 1;
 				globalClipLenght ++;
 			}
+			globalClip[i] ++; // mark global clip second
+			
+			localCommentFrequency += commentFQ[i];
 		}
 		
 		// recall
@@ -480,7 +587,17 @@ async function main(){
 		else {
 			clipMiss ++;
 		}
+		
+		/* for true clip length & comment frequency analysis */
+		avgCommentFrequencyForEachClipLength[duration] += localCommentFrequency / duration;
 	}
+	
+	let avgClipFQ = 0;
+	
+	let TP = 0,
+		TN = 0,
+		FP = 0,
+		FN = 0;
 	
 	let globalOverlap = 0;
 	let predictionMiss = 0; // for statistical analysis
@@ -509,12 +626,31 @@ async function main(){
 		}
 		
 		// global
-		if (globalPredictedFragment[i] == 1 && globalClip[i] == 1){
+		if (globalPredictedFragment[i] && globalClip[i]){
 			globalOverlap ++;
+			
+			TP ++;
+			
+			avgClipFQ += commentFQ[i];
+		}
+		else if (!globalPredictedFragment[i] && !globalClip[i]){
+			TN ++;
+		}
+		else if (globalPredictedFragment[i] && !globalClip[i]){
+			FP ++;
+		}
+		else {
+			FN ++;
+			
+			avgClipFQ += commentFQ[i];
 		}
 	}
-	console.log(localPrecision/(predictedFragmentCount - predictionMiss));
-	console.log(localRecall/(clipList.length - clipMiss));
+	
+	//console.log(predictedFragmentCount);
+	//console.log(clipLength);
+	console.log(localPrecision/(predictedFragmentCount - predictionMiss)); // local percision w/o missed fragments
+	console.log(localRecall/(clipList.length - clipMiss)); // local recall w/o missed fragments
+	
 	localPrecision /= predictedFragmentCount;
 	localRecall /= clipList.length;
 	
@@ -524,8 +660,32 @@ async function main(){
 	console.log(localPrecision + ' ' + localRecall);
 	console.log(localBestPrecision + ' ' + localBestRecall);
 	console.log(globalOverlap/globalPredictedFragmentLength + ' ' + globalOverlap/globalClipLenght);
+	
 	console.log(predictionMiss + ' ' + clipMiss);
-	console.log(offsetToLeft + ' ' + noOffset + ' ' + offsetToRight)
+	console.log(offsetToLeft + ' ' + noOffset + ' ' + offsetToRight);
+	
+	console.log(TP + ' ' + TN + ' ' + FP + ' ' + FN + ', ' + globalClipLenght);
+	
+	/* for predicted and ground true fragment length & comment frequency analysis */
+	for (let i = 5; i<=60; i++){
+		if (eachPredictionLengthCounter[i]){
+			avgCommentFrequencyForEachPredictionLength[i] /= eachPredictionLengthCounter[i];
+		}
+		if (eachClipLengthCounter[i]){
+			avgCommentFrequencyForEachClipLength[i] /= eachClipLengthCounter[i];
+		}
+		//avgCommentFrequencyForEachPredictionLength[i] /= (eachPredictionLengthCounter[i]) ? eachPredictionLengthCounter[i] : 1;
+		//avgCommentFrequencyForEachClipLength[i] /= (eachClipLengthCounter[i]) ? eachClipLengthCounter[i] : eachClipLengthCounter[i];
+	}
+	console.log(eachPredictionLengthCounter);
+	console.log(avgCommentFrequencyForEachPredictionLength);
+	console.log(eachClipLengthCounter);
+	console.log(avgCommentFrequencyForEachClipLength);
+	
+	//fs.writeFileSync('./p.txt', globalPredictedFragment);
+	//fs.writeFileSync('./c.txt', globalClip);
+	
+	//console.log(avgClipFQ / globalClipLenght); // 3.333990425232329
 	
 	//console.log(predictedFragment[testi]);
 	//await Promise.all(writingPromise);
