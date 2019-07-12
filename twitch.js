@@ -345,7 +345,7 @@ async function main(){
 	let avgCommentFrequencyForEachPredictionLength = new Array(61).fill(0),
 		avgCommentFrequencyForEachClipLength = new Array(61).fill(0); // for predicted and ground true fragment length & comment frequency analysis
 	
-	let avgComentFrequency = sum / videoLength;
+	let avgComentFrequency = sum / videoLength; // 2.526795059660875
 	/*let avgComentFrequency = 3.333990425232329; // average comment frequency in highlight fragment*/
 	let localCommentFrequency = 0; // for predicted and ground true fragment length & comment frequency analysis
 	let strike = 0;
@@ -354,8 +354,8 @@ async function main(){
 			strike ++
 			localCommentFrequency += commentFQ[i];
 		}
-		else {
-			if (strike >= 5){
+		else { // no strike or after strike
+			if (strike >= 5){ // if the last strike larger than minimum clip length
 				let index = i - strike;
 				predictedFragment[index] = {};
 				predictedFragment[index]['duration'] = strike;
@@ -379,15 +379,15 @@ async function main(){
 		}
 		
 		if (i == videoLength - 1 && strike >= 5){ // check for the last second
-			let index = i - strike;
+			let index = videoLength - strike;
 			predictedFragment[index] = {};
 			predictedFragment[index]['duration'] = strike;
 			predictedFragment[index]['precision'] = [];
-			//console.log(i-strike + ' ' + strike)
+			//console.log(videoLength-strike + ' ' + strike)
 			
 			predictedFragmentCount ++;
 			
-			for (let j=index; j<i; j++){
+			for (let j=index; j<=i; j++){ // also mark the last second
 				globalPredictedFragment[j] = 1;
 			}
 			globalPredictedFragmentLength += strike;

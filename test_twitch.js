@@ -8,7 +8,7 @@ let config = require('./json/Config.json'); // application setting
 /* Channel */
 const TARGET_CHANNEL_LIST = ['ninja', 'shroud', 'tfue', 'lirik', 'summit1g', 'sodapoppin', 'timthetatman', 'loltyler1', 'drdisrespect', 'asmongold', 'dakotaz', 'nickmercs', 'tsm_daequan', 'xqcow', 'castro_1021'];
 const COMPETITION_CHANNEL_LIST = ['overwatchleague', 'riotgames', 'rocketleague', 'esl_csgo', 'playhearthstone', 'easportsfifa', 'fortnite', 'warcraft', 'callofduty', 'esl_dota2'];
-const CANDIDATE_CHANNEL_LIST = ['yassuo', 'mongraal', 'pokimane', 'nl_kripp', 'moonmoon_ow', 'dizzy', 'thijs', 'tsm_hamlinz', 'maximilian_dood', 'nightblue3', 'imaqtpie', 'drlupo'];
+const CANDIDATE_CHANNEL_LIST = ['yassuo', 'mongraal', 'pokimane', 'nl_kripp', 'moonmoon_ow', 'dizzy', 'thijs', 'tsm_hamlinz', 'maximilian_dood', 'nightblue3', 'imaqtpie', 'drlupo', 'forsen'];
 const SPECIAL_CHANNEL_LIST = ['magic', 'oldschoolrs', 'criticalrole', 'twitch', 'rajjpatel'];
 
 let channel_name_lists = [TARGET_CHANNEL_LIST], // channels that we want to collect /*, COMPETITION_CHANNEL_LIST, CANDIDATE_CHANNEL_LIST, SPECIAL_CHANNEL_LIST 2019-04-05T01:00:00.000Z*/
@@ -30,6 +30,8 @@ function message(str, show=true){
 function log(code, message, show=true){
 	/* 
 		00: The original video of specified clip can not be access.
+		01: In crawlAllChatMessage(), target video is not in 'recorded' status.
+		02: In crawlAllChatMessage(), target video has been deleted (404 error message).
 	*/
 	if (show){
 		fs.appendFileSync('./event_log.txt', moment().format("YYYY/MM/DD kk:mm:ss A") + " | Error " + code.toString().padStart(config.ErrorCodeLength, "0") + ": " + message + "\n", "UTF-8");
@@ -179,7 +181,7 @@ function crawlSpecifiedClipInfoV5(slug, retry = 0){
 					if (config.debug_mode){ // debug option
 						console.log(error);
 					}
-					reject('Retry limit reached(' + crawlSpecifiedClipInfoV5.name + ' - ' + slug + ').');
+					reject('Retry limit reached (' + crawlSpecifiedClipInfoV5.name + ' - ' + slug + ').');
 				}
 			}
 			else {
@@ -308,7 +310,7 @@ function crawlClipInfo(channel, start, end, cursor, retry = 0){ /* 一樣最大�
 					if (config.debug_mode){ // debug option
 						console.log(error);
 					}
-					reject('Retry limit reached(' + crawlClipInfo.name + ' - ' + channel + ' | Start at: ' + start + ').');
+					reject('Retry limit reached (' + crawlClipInfo.name + ' - ' + channel + ' | Start at: ' + start + ').');
 				}
 			}
 			else{
@@ -340,37 +342,145 @@ function crawlClipInfo(channel, start, end, cursor, retry = 0){ /* 一樣最大�
 	});
 }
 
-function checkVideoInfo(channel, id){
-	let infoPath = './vod/' + channel + '/' + id + '/info.json'; // the path of video info
-	
-	return new Promise(function (resolve, reject){
-		if ( fs.existsSync(infoPath) ){
-			resolve();
-		}
-		else {
+function checkAllVideoInfo(channelName){	
+	return new Promise(async function (resolve, reject){
+		let videoList = fs.readdirSync('./vod/' + channelName);
+		let counter = 0;
+		const crawlAllMessagePromise = [];
+		
+		for (const videoID of videoList){
+			let infoPath = './vod/' + channelName + '/' + videoID + '/info.json'; // the path of video info
 			
+			if ( fs.existsSync(infoPath) ){ // already crawl the info
+				continue;
+			}
+			else {
+				counter ++;
+				crawlAllMessagePromise.push( crawlAllChatMessage(channelName, videoID) ); // crawl
+			}
+			
+			if (counter >= 5){ // running task is more than 5
+				counter = 0; // reset
+				
+				// wait all phased task complete
+				await Promise.all(crawlAllMessagePromise);
+				await Promise.all(writingPromise);
+			}
 		}
+		
+		// wait all task complete
+		await Promise.all(crawlAllMessagePromise);
+		await Promise.all(writingPromise);
+		
+		resolve();
 	});
 }
 
-function getVideoInfoV5(id){
+function getVideoInfoV5(id, retry = 0){
 	return new Promise(function (resolve, reject){
 		request({
-			url: 'https://api.twitch.tv/kraken/videos/' + id,
-			headers:{
-				Accept: 'application/vnd.twitchtv.v5+json',
-				//'Client-ID': config['client_id']
-				Authorization: 'OAuth ' +  config['authorization_token']
-				},
-			method: "GET"
-			}, function(error, res, body){
-				console.log(JSON.parse(body));
-			});
+		url: 'https://api.twitch.tv/kraken/videos/' + id,
+		headers:{
+			Accept: 'application/vnd.twitchtv.v5+json',
+			'Client-ID': config['client_id'],
+			Authorization: 'Bearer ' +  config['authorization_token'] /* I don't know why use bearer token */	/* 無法使用授權 { error: 'Unauthorized',  status: 401,  message: 'invalid oauth token' } */
+			},
+		method: "GET"
+		}, async function(error, res, body){
+			if (error || ! body || (res.statusCode != 200 && res.statusCode != 404)){ // unexpected error
+				if (retry < config.max_retry){ // retry (now set 5 times)
+					retry ++; // try again
+					
+					if (config.debug_mode){ // debug option
+						console.log('Get specified video info (Twitch API V5) failed, retry ' + (5000 * retry) + ' seconds later...( Status Code: '+ res.statusCode + ' - ' + id + ' )');
+					}
+					await delay(5000 * retry); // wait 5* seconds and retry
+					
+					try {
+						if (config.debug_mode){ // debug option
+							console.log('now retry ' + retry + ' times.( ' + id + ' )');
+						}
+						
+						let data = await getVideoInfoV5(id, retry);
+						resolve(data);
+					}
+					catch(rejectMessage) {
+						if (config.debug_mode){ // debug option
+							console.log(rejectMessage);
+						}
+						reject(rejectMessage);
+					}
+				}
+				else { // up to retry limit
+					if (config.debug_mode){ // debug option
+						console.log(error);
+					}
+					reject('Retry limit reached (' + getVideoInfoV5.name + ' - ' + id + ').');
+				}
+			}
+			else { // normal case or target video has been deleted (statusCode == 404 and return error message)
+				//console.log(JSON.parse(body));
+				resolve(body);
+			}
 		});
 	});
 }
 
-function getChatMessage(id, cursor){
+function getVideoInfo(id, retry = 0){
+	let queryString = {
+		id: id /* it can be multiple value */
+	};
+	
+	return new Promise(function (resolve, reject){
+		request({
+		url: 'https://api.twitch.tv/helix/videos',
+		qs: queryString,
+		headers:{
+			//'Client-ID': config['client_id']
+			Authorization: 'Bearer ' +  config['authorization_token']
+			},
+		method: "GET"
+		}, async function(error, res, body){
+			if (error || ! body || res.statusCode != 200){ // unexpected error
+				if (retry < config.max_retry){ // retry (now set 5 times)
+					retry ++; // try again
+					
+					if (config.debug_mode){ // debug option
+						console.log('Get specified video info failed, retry ' + (5000 * retry) + ' seconds later...( Status Code: '+ res.statusCode + ' - ' + id + ' )');
+					}
+					await delay(5000 * retry); // wait 5* seconds and retry
+					
+					try {
+						if (config.debug_mode){ // debug option
+							console.log('now retry ' + retry + ' times.( ' + id + ' )');
+						}
+						
+						let data = await getVideoInfo(id, retry);
+						resolve(data);
+					}
+					catch(rejectMessage) {
+						if (config.debug_mode){ // debug option
+							console.log(rejectMessage);
+						}
+						reject(rejectMessage);
+					}
+				}
+				else {
+					if (config.debug_mode){ // debug option
+						console.log(error);
+					}
+					reject('Retry limit reached (' + getVideoInfo.name + ' - ' + id + ').');
+				}
+			}
+			else {
+				//console.log(JSON.parse(body));
+				resolve(body);
+			}
+		});
+	});
+}
+
+function getChatMessage(id, cursor, retry = 0){
 	return new Promise(function (resolve, reject){
 		request({
 		url: 'https://api.twitch.tv/v5/videos/' + id + '/comments?' + ((cursor) ? 'cursor=' + cursor : 'content_offset_seconds=0'),
@@ -380,47 +490,106 @@ function getChatMessage(id, cursor){
 			//Authorization: 'OAuth ' +  config['authorization_token'] /* 無法使用授權 { error: 'Unauthorized',  status: 401,  message: 'invalid oauth token' } */
 			},
 		method: "GET"
-		}, function(error, res, body){
-			/* the field 'source' will be different when message is published in live broadcast(value 'chat') or after live(published in vod video, value 'comment') */
-			/* message be published in vod will publish in integer second */
-			
-			/*let data = JSON.parse(body)
-			for (const comment of data['comments']){
-				console.log(comment);
-			}*/
-			
-			resolve(body);
+		}, async function(error, res, body){
+			if (error || ! body || res.statusCode != 200){ // unexpected error
+				if (retry < config.max_retry){ // retry (now set 5 times)
+					retry ++; // try again
+					
+					if (config.debug_mode){ // debug option
+						console.log('Get specified chat message fragment failed, retry ' + (5000 * retry) + ' seconds later...( Status Code: '+ res.statusCode + ' - ' + id + ((cursor) ? ' ' + cursor : '') + ' )');
+					}
+					await delay(5000 * retry); // wait 5* seconds and retry
+					
+					try {
+						if (config.debug_mode){ // debug option
+							console.log('now retry ' + retry + ' times.( ' + id + ((cursor) ? ' ' + cursor : '') + ' )');
+						}
+						
+						let data = await getChatMessage(id, cursor, retry);
+						resolve(data);
+					}
+					catch(rejectMessage) {
+						if (config.debug_mode){ // debug option
+							console.log(rejectMessage);
+						}
+						reject(rejectMessage);
+					}
+				}
+				else {
+					if (config.debug_mode){ // debug option
+						console.log(error);
+					}
+					reject('Retry limit reached (' + getChatMessage.name + ' - ' + id + ((cursor) ? ' ' + cursor : '') + ').');
+				}
+			}
+			else {
+				/* the field 'source' will be different when message is published in live broadcast(value 'chat') or after live(published in vod video, value 'comment') */
+				/* message be published in vod will publish in integer second */
+				
+				/*let data = JSON.parse(body)
+				for (const comment of data['comments']){
+					console.log(comment);
+				}*/
+				
+				resolve(body); // raw data
+			}
 		});
 	});
 }
 
 async function crawlAllChatMessage(channel, videoID){
-	const crawlChatPromise = [];
-
-	let cursor;
-	let message_id = 1;
-	do {
-		let rawData = await getChatMessage(id, cursor);
-		let data = JSON.parse(rawData);
-		
-		cursor = data['_next'];
-		
-		crawlChatPromise.push(
-			new Promise( (resolve, reject) => {
-				fs.writeFile('./vod/' + channel + '/' + id + '/Message-' + message_id + '.json', rawData, (err) => {
-					if (err) throw err;
-					resolve();
-				});
-			})
-		);
-		
-		message_id ++;
-	} while (cursor);
+	message('Crawling video ' + videoID + ' chat message.');
+	let rawVideoData = await getVideoInfoV5(videoID),
+		videoInfo = JSON.parse(rawVideoData);
 	
-	return new Promise( async (resolve,reject) => {
-		await Promise.all(crawlChatPromise);
-		resolve();
-	});
+	if (videoInfo['status'] == 404){
+		log(2, "Target video has been deleted ( " + channel + ': ' + videoID + ' )');
+		syncWriteData('./vod/' + channel + '/' + videoID + '/info.json', rawVideoData); // let info.json as a mark for completing this task
+		message('Target video has been deleted (' + videoID + ').');
+		
+		return new Promise((resolve,reject) => {		
+			resolve();
+		});
+	}
+	else if (videoInfo['status'] === 'recorded'){
+		const crawlChatPromise = [];
+
+		let cursor;
+		let message_id = 1;
+		do {
+			let rawData = await getChatMessage(videoID, cursor);
+			let data = JSON.parse(rawData);
+			//console.log(videoID + ' - ' + message_id);
+			cursor = data['_next'];
+			
+			crawlChatPromise.push(
+				new Promise( (resolve, reject) => {
+					fs.writeFile('./vod/' + channel + '/' + videoID + '/Message-' + message_id + '.json', rawData, (err) => {
+						if (err) throw err;
+						resolve();
+					});
+				})
+			);
+			
+			message_id ++;
+		} while (cursor);
+		
+		return new Promise( async (resolve,reject) => {
+			await Promise.all(crawlChatPromise);
+			syncWriteData('./vod/' + channel + '/' + videoID + '/info.json', rawVideoData); // let info.json as a mark for completing this task
+			message('Complete to crawl chat room message of video ' + videoID + '.');
+			
+			resolve();
+		});
+	}
+	else {
+		log(1, "Target video is not in 'recorded' status ( " + channel + ': ' + videoID + ' - ' + videoInfo['status'] + ' )');
+		message('Target video ' + videoID + " is not in 'recorded' status, check log message (" +  videoInfo['status'] + ').');
+		
+		return new Promise((resolve,reject) => {		
+			resolve();
+		});
+	}
 }
 
 function getUserInfo(channelName){ // get specific twitch user info
@@ -461,7 +630,7 @@ async function main(){
 	syncWriteData('./json/Channel_ID.json', JSON.stringify(channel_id_list)); // store
 	
 	/* Crawl clip info */
-	while (ended_date.isBefore( moment.utc() )){ // WARNING!! it is inaccurate, moment.utc() use local compute time
+	while ( moment().diff(started_date, 'days') >= 7 ){ // only crawl data for more than 7 days	// WARNING!! it is inaccurate, moment.utc() use local compute time
 		// move to next period
 		console.log('==== Go to next period ===='); // message
 		started_date.add(config.period, config.period_key);
@@ -488,13 +657,25 @@ async function main(){
 		config.recorded_date = started_date.toISOString(); // update recorded date
 		fs.writeFileSync('./json/Config.json', JSON.stringify(config)); // update config
 	}
+	
+	/* Crawl chat room message */
+	for (const channelList of channel_name_lists){ // loop all list
+		console.log('Now changing to another channel list.'); // message
+		for (const channelName of channelList){ // loop all channel in the specific list
+			message('Checking video info: ' + channelName);
+			await checkAllVideoInfo(channelName);
+		}
+	}
+	
 	//await getClipInfo('xqcow', undefined, undefined, 'eyJiIjpudWxsLCJhIjp7IkN1cnNvciI6Ik1UQXcifX0');
 	//await getSpecifiedClipInfo('EnticingWanderingRaccoonDancingBaby');
 	//await getTwitchAuthentication();
-	//await revokeTwitchAuthentication('4z8sg260egrxqtr5ukejw9742x3ft8');
+	//await revokeTwitchAuthentication('4fc714jcww4oi9yjockjy1l32ftf66');
 	//await getSpecifiedClipInfoV5('CaringColdHamsterRalpherZ');
-	//await getChatMessage('426058258', 'eyJpZCI6Ijg3ZWFlNDViLTYxOGMtNDc5MC05MzhmLTk5ZGM2ODI3OGVkMiIsImhrIjoiYnJvYWRjYXN0OjM0MTUyNjA4MjA4Iiwic2siOiJBQUFBQXlHdXRvQVZuNFN4VGpwRGdBIn0f');
-	
+	//await getChatMessage('406035831');
+	//await getVideoInfo('415749436');
+	//await getVideoInfoV5('389178879');
+	//await crawlAllChatMessage('xqcow', '406035831');
 	
 	await Promise.all(writingPromise);
 }
