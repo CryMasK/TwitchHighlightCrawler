@@ -9,6 +9,9 @@ console.log(moment().diff(moment('2019-03-04T02:08:11Z'), 'days'));
 console.log(moment('2019-03-04T02:08:11Z').diff(moment(), 'days'));
 console.log(c.diff(moment(), 'days'));
 
+//console.log(moment('2019-07-09T06:08:11Z').diff(moment('2019-07-02T06:00:00.000Z'), 'days')); // 7
+console.log(moment().diff(moment('2019-07-20T13:00:00.000Z'), 'days'));
+
 //let a = moment('2019-03-04T00:00:00Z')
 //console.log(a.add(1, 'days').toISOString()); // 2019-03-05T00:00:00.000Z
 //console.log(a.toISOString()); // 2019-03-05T00:00:00.000Z
